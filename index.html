@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>文本转换与时间戳工具</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+        "Noto Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      margin: 2rem auto;
+      max-width: 980px;
+      padding: 0 1rem;
+    }
+    h1 { font-weight: 700; font-size: 1.35rem; margin: 0 0 1rem; }
+    section { border: 1px solid #9993; border-radius: 12px; padding: 1rem; margin: 1rem 0; }
+    h2 { font-size: 1.05rem; margin: 0 0 .8rem; }
+    label { display: block; margin: .35rem 0 .45rem; font-weight: 650; }
+    textarea, input[type="text"] {
+      width: 100%;
+      padding: .65rem .75rem;
+      border: 1px solid #9996;
+      border-radius: 10px;
+      font-size: .95rem;
+      box-sizing: border-box;
+      outline: none;
+    }
+    textarea { min-height: 180px; resize: vertical; }
+    button {
+      padding: .62rem .9rem;
+      border-radius: 10px;
+      border: 1px solid #9996;
+      background: #eee;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: .6rem;
+      align-items: center;
+      margin-top: .6rem;
+    }
+    @media (min-width: 820px) {
+      .row.cols-2 { grid-template-columns: 1fr 1fr; }
+      .row.cols-btn-3 { grid-template-columns: auto auto auto; justify-content: start; }
+      .row.cols-btn-2 { grid-template-columns: 1fr auto auto; }
+    }
+    .note { color: #888; font-size: .9rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .out {
+      border: 1px dashed #9996;
+      border-radius: 12px;
+      padding: .75rem;
+      margin-top: .6rem;
+      white-space: pre-wrap;
+    }
+    .ok { color: #1a7f37; font-weight: 650; }
+    .err { color: #c00; font-weight: 650; }
+    .muted { color: #888; }
+  </style>
+</head>
+
+<body>
+  <h1>文本转换与时间戳工具</h1>
+
+  <!-- 简繁转换 -->
+  <section id="secOpenCC">
+    <h2>简繁转换</h2>
+
+    <div class="row cols-2">
+      <div>
+        <label for="ccIn">输入</label>
+        <textarea id="ccIn" placeholder="在这里粘贴简体或繁体文本…"></textarea>
+      </div>
+      <div>
+        <label for="ccOut">输出（只读）</label>
+        <textarea id="ccOut" readonly placeholder="转换结果将显示在这里…"></textarea>
+      </div>
+    </div>
+
+    <div class="row cols-btn-3">
+      <button id="btnS2TWP">简→繁</button>
+      <button id="btnT2S">繁→简</button>
+      <button id="btnCopyCC">复制输出</button>
+    </div>
+
+    <div id="ccMsg" class="out muted">提示：输入文本后选择转换方向。</div>
+  </section>
+
+  <!-- 时间戳转换 -->
+  <section id="secTime">
+    <h2>时间戳转换</h2>
+
+    <label for="tsIn">Unix 时间戳（支持秒/毫秒；例：1592483696789）</label>
+    <div class="row cols-btn-2">
+      <input id="tsIn" type="text" class="mono" placeholder="1592483696789 或 1592483696" autocomplete="off" spellcheck="false" />
+      <button id="btnTsToTime">转为时间</button>
+      <button id="btnNowTs">填入当前时间</button>
+    </div>
+    <div id="tsOut" class="out mono muted">输出：—</div>
+  </section>
+
+  <script type="module">
+    // OpenCC WASM (Apache-2.0)
+    import OpenCC from "https://unpkg.com/opencc-wasm@0.6.1/dist/esm/index.js";
+
+    // Day.js (MIT)
+    import dayjs from "https://unpkg.com/dayjs@1.11.19/esm/index.js";
+    import utc from "https://unpkg.com/dayjs@1.11.19/esm/plugin/utc/index.js";
+    import timezone from "https://unpkg.com/dayjs@1.11.19/esm/plugin/timezone/index.js";
+    import relativeTime from "https://unpkg.com/dayjs@1.11.19/esm/plugin/relativeTime/index.js";
+
+    dayjs.extend(utc);
+    dayjs.extend(timezone);
+    dayjs.extend(relativeTime);
+
+    // ====== UI helpers ======
+    const $ = (id) => document.getElementById(id);
+
+    async function copyText(text) {
+      const s = String(text ?? "");
+      if (!s) return false;
+      try {
+        await navigator.clipboard.writeText(s);
+        return true;
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = s;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } finally { ta.remove(); }
+        return true;
+      }
+    }
+
+    function setBox(el, kind, text) {
+      el.className = "out mono " + (kind === "ok" ? "ok" : kind === "err" ? "err" : "muted");
+      el.textContent = text;
+    }
+
+    // ====== OpenCC converters (create once, reuse) ======
+    const ccS2TWP = OpenCC.Converter({ config: "s2twp" });
+    const ccT2S   = OpenCC.Converter({ config: "t2s" });
+
+    const ccIn = $("ccIn");
+    const ccOut = $("ccOut");
+    const ccMsg = $("ccMsg");
+    const btnS2TWP = $("btnS2TWP");
+    const btnT2S = $("btnT2S");
+    const btnCopyCC = $("btnCopyCC");
+
+    async function runConvert(which) {
+      const input = ccIn.value ?? "";
+      ccOut.value = "";
+      btnS2TWP.disabled = btnT2S.disabled = btnCopyCC.disabled = true;
+      setBox(ccMsg, "muted", "处理中…");
+      try {
+        const fn = which === "s2twp" ? ccS2TWP : ccT2S;
+        const out = input ? await fn(input) : "";
+        ccOut.value = out;
+        setBox(ccMsg, "ok", `完成（长度 ${out.length}）`);
+      } catch (e) {
+        setBox(ccMsg, "err", "转换失败：" + (e?.message ?? e));
+      } finally {
+        btnS2TWP.disabled = btnT2S.disabled = false;
+        btnCopyCC.disabled = false;
+      }
+    }
+
+    btnS2TWP.addEventListener("click", () => runConvert("s2twp"));
+    btnT2S.addEventListener("click", () => runConvert("t2s"));
+    btnCopyCC.addEventListener("click", async () => {
+      const ok = await copyText(ccOut.value);
+      setBox(ccMsg, ok ? "ok" : "err", ok ? "已复制输出" : "复制失败（浏览器权限限制）");
+    });
+
+    // ====== Timestamp tools ======
+    const tzGuess = dayjs.tz.guess?.() || Intl.DateTimeFormat().resolvedOptions().timeZone || "Local";
+
+    const tsIn = $("tsIn");
+    const tsOut = $("tsOut");
+    const btnTsToTime = $("btnTsToTime");
+    const btnNowTs = $("btnNowTs");
+
+    const FMT = "YYYY-MM-DD HH:mm:ss.SSS";
+
+    function parseEpochLike(s) {
+      const raw = String(s ?? "").trim();
+      if (!raw) throw new Error("请输入时间戳");
+      if (!/^\d+$/.test(raw)) throw new Error("时间戳应为纯数字（秒/毫秒）");
+
+      if (raw.length === 10) return Number(raw) * 1000;
+      if (raw.length === 13) return Number(raw);
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new Error("时间戳不是有效数字");
+      return n < 1e12 ? n * 1000 : n;
+    }
+
+    function prettyFromTs(ms) {
+      const dLocal = dayjs(ms);
+      const dUtc = dayjs(ms).utc();
+      const dTz = dayjs(ms).tz(tzGuess);
+
+      const lines = [
+        `毫秒(ms): ${ms}`,
+        `秒(s):    ${Math.floor(ms / 1000)}`,
+        `本地:     ${dLocal.format(FMT)} (${tzGuess})`,
+        `UTC:      ${dUtc.format(FMT)} (UTC)`,
+        `ISO:      ${dUtc.toISOString?.() ?? dUtc.format()}`,
+        `相对:     ${dLocal.fromNow()}`,
+        `时区显示: ${dTz.format(FMT)} (${tzGuess})`,
+      ];
+      return lines.join("\n");
+    }
+
+    btnTsToTime.addEventListener("click", () => {
+      try {
+        const ms = parseEpochLike(tsIn.value);
+        setBox(tsOut, "ok", prettyFromTs(ms));
+      } catch (e) {
+        setBox(tsOut, "err", "转换失败：" + (e?.message ?? e));
+      }
+    });
+
+    btnNowTs.addEventListener("click", () => {
+      const now = Date.now();
+      tsIn.value = String(now);
+      setBox(tsOut, "ok", prettyFromTs(now));
+    });
+  </script>
+</body>
+</html>
