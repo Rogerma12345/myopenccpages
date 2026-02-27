@@ -102,7 +102,34 @@
     </div>
     <div id="tsOut" class="out mono muted">输出：—</div>
   </section>
+  <!-- URL 拉取 -->
+  <section id="secFetch">
+    <h2>拉取 URL 内容</h2>
 
+    <label for="fetchUrl">URL</label>
+    <input id="fetchUrl" type="text" class="mono" placeholder="https://example.com/data.txt" autocomplete="off" spellcheck="false" />
+
+    <div class="row cols-btn-2">
+      <input id="fetchInterval" type="text" class="mono" placeholder="刷新间隔（秒），留空或 0 表示不定时" autocomplete="off" spellcheck="false" />
+      <button id="btnFetchNow">立即拉取</button>
+      <button id="btnFetchStart">开始定时</button>
+    </div>
+
+    <div class="row cols-btn-3">
+      <button id="btnFetchStop" disabled>停止</button>
+      <button id="btnCopyFetch">复制正文</button>
+      <button id="btnClearFetch">清空输出</button>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="fetchOut">响应正文（只读）</label>
+        <textarea id="fetchOut" class="mono" readonly placeholder="响应正文将显示在这里…"></textarea>
+      </div>
+    </div>
+
+    <div id="fetchMsg" class="out muted">提示：目标站点需要允许 CORS 才能读取正文。</div>
+  </section>
   <script type="module">
     // OpenCC WASM (Apache-2.0)
     import OpenCC from "https://unpkg.com/opencc-wasm@0.6.1/dist/esm/index.js";
@@ -232,6 +259,195 @@
       tsIn.value = String(now);
       setBox(tsOut, "ok", prettyFromTs(now));
     });
+    // ====== Fetch URL tools ======
+    const fetchUrl = $("fetchUrl");
+    const fetchInterval = $("fetchInterval");
+    const fetchOut = $("fetchOut");
+    const fetchMsg = $("fetchMsg");
+    const btnFetchNow = $("btnFetchNow");
+    const btnFetchStart = $("btnFetchStart");
+    const btnFetchStop = $("btnFetchStop");
+    const btnCopyFetch = $("btnCopyFetch");
+    const btnClearFetch = $("btnClearFetch");
+
+    const LS_URL = "urlfetch_url";
+    const LS_INTERVAL = "urlfetch_interval";
+    let fetchTimer = null;
+    let inFlight = null; // AbortController
+
+    function readIntervalSeconds() {
+      const raw = String(fetchInterval.value ?? "").trim();
+      if (!raw) return 0;
+      if (!/^\d+$/.test(raw)) throw new Error("刷新间隔应为非负整数（秒）");
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) throw new Error("刷新间隔不是有效数字");
+      return n;
+    }
+
+    function setFetchRunning(running) {
+      btnFetchNow.disabled = running;
+      btnFetchStart.disabled = running;
+      btnFetchStop.disabled = !running;
+    }
+
+    function saveFetchPrefs() {
+      try {
+        localStorage.setItem(LS_URL, String(fetchUrl.value ?? ""));
+        localStorage.setItem(LS_INTERVAL, String(fetchInterval.value ?? ""));
+      } catch {}
+    }
+
+    function loadFetchPrefs() {
+      try {
+        const u = localStorage.getItem(LS_URL);
+        const i = localStorage.getItem(LS_INTERVAL);
+        if (u) fetchUrl.value = u;
+        if (i) fetchInterval.value = i;
+      } catch {}
+    }
+
+    function stopFetchTimer(showMsg = true) {
+      if (fetchTimer) {
+        clearInterval(fetchTimer);
+        fetchTimer = null;
+      }
+      if (inFlight) {
+        try { inFlight.abort(); } catch {}
+        inFlight = null;
+      }
+      setFetchRunning(false);
+      if (showMsg) setBox(fetchMsg, "muted", "已停止。");
+    }
+
+    async function doFetchOnce() {
+      const url = String(fetchUrl.value ?? "").trim();
+      if (!url) throw new Error("请输入 URL");
+      // 基础校验：避免明显无效值
+      if (!/^https?:\/\//i.test(url)) throw new Error("URL 需以 http:// 或 https:// 开头");
+
+      saveFetchPrefs();
+
+      // 终止上一次未完成的请求
+      if (inFlight) {
+        try { inFlight.abort(); } catch {}
+        inFlight = null;
+      }
+
+      const controller = new AbortController();
+      inFlight = controller;
+
+      const timeoutMs = 15000;
+      const t0 = Date.now();
+      setBox(fetchMsg, "muted", "拉取中…");
+
+      const timer = setTimeout(() => {
+        try { controller.abort(); } catch {}
+      }, timeoutMs);
+
+      try {
+        const res = await fetch(url, {
+          method: "GET",
+          cache: "no-store",
+          redirect: "follow",
+          signal: controller.signal,
+        });
+
+        const ct = res.headers.get("content-type") || "-";
+        const cl = res.headers.get("content-length") || "-";
+
+        const text = await res.text();
+        fetchOut.value = text;
+
+        const ms = Date.now() - t0;
+        const when = dayjs(Date.now()).format("YYYY-MM-DD HH:mm:ss.SSS");
+
+        const statusLines = [
+          `时间: ${when}`,
+          `耗时: ${ms} ms`,
+          `HTTP: ${res.status} ${res.statusText || ""}`.trim(),
+          `Content-Type: ${ct}`,
+          `Content-Length(header): ${cl}`,
+          `正文长度(字符): ${text.length}`,
+        ];
+
+        // HTTP 非 2xx 仍然可能有正文，这里把状态作为提示，不强制当作异常
+        setBox(fetchMsg, res.ok ? "ok" : "err", statusLines.join("\n"));
+      } catch (e) {
+        const when = dayjs(Date.now()).format("YYYY-MM-DD HH:mm:ss.SSS");
+        const name = e?.name ?? "Error";
+        const msg = e?.message ?? String(e);
+
+        // 常见失败原因提示（不做绕过）
+        const hintLines = [
+          `时间: ${when}`,
+          `错误: ${name}: ${msg}`,
+          `说明: 目标站点未开放 CORS、网络不可达、URL 无效、或被浏览器拦截时会失败。`,
+          `处置: 需要目标站点返回允许跨域的响应头，或使用你可控的服务端代理转发。`,
+        ];
+        setBox(fetchMsg, "err", hintLines.join("\n"));
+      } finally {
+        clearTimeout(timer);
+        inFlight = null;
+      }
+    }
+
+    function startFetchTimer() {
+      const sec = readIntervalSeconds();
+      if (sec <= 0) throw new Error("刷新间隔需大于 0 秒才可开始定时");
+      if (fetchTimer) stopFetchTimer(false);
+
+      setFetchRunning(true);
+      setBox(fetchMsg, "muted", `定时已启动：每 ${sec} 秒拉取一次。`);
+
+      // 先立即拉取一次
+      doFetchOnce().catch((e) => {
+        setBox(fetchMsg, "err", "拉取失败：" + (e?.message ?? e));
+      });
+
+      fetchTimer = setInterval(() => {
+        doFetchOnce().catch(() => {});
+      }, sec * 1000);
+    }
+
+    // 绑定事件
+    loadFetchPrefs();
+
+    btnFetchNow.addEventListener("click", async () => {
+      try {
+        setFetchRunning(true);
+        await doFetchOnce();
+      } catch (e) {
+        setBox(fetchMsg, "err", "拉取失败：" + (e?.message ?? e));
+      } finally {
+        // 若没有启动定时，则恢复按钮
+        if (!fetchTimer) setFetchRunning(false);
+      }
+    });
+
+    btnFetchStart.addEventListener("click", () => {
+      try {
+        startFetchTimer();
+      } catch (e) {
+        setBox(fetchMsg, "err", "无法启动定时：" + (e?.message ?? e));
+        setFetchRunning(false);
+      }
+    });
+
+    btnFetchStop.addEventListener("click", () => stopFetchTimer(true));
+
+    btnCopyFetch.addEventListener("click", async () => {
+      const ok = await copyText(fetchOut.value);
+      setBox(fetchMsg, ok ? "ok" : "err", ok ? "已复制正文" : "复制失败（浏览器权限限制）");
+    });
+
+    btnClearFetch.addEventListener("click", () => {
+      stopFetchTimer(false);
+      fetchOut.value = "";
+      setBox(fetchMsg, "muted", "已清空输出。");
+    });
+
+    // 页面关闭时停止定时与请求
+    window.addEventListener("beforeunload", () => stopFetchTimer(false));
   </script>
 </body>
 </html>
