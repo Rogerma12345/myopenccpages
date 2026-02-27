@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>文本转换与时间戳工具</title>
+  <title>转换工具</title>
   <style>
     :root { color-scheme: light dark; }
     body {
@@ -76,7 +76,7 @@
         <textarea id="ccIn" placeholder="在这里粘贴简体或繁体文本…"></textarea>
       </div>
       <div>
-        <label for="ccOut">输出（只读）</label>
+        <label for="ccOut">输出</label>
         <textarea id="ccOut" readonly placeholder="转换结果将显示在这里…"></textarea>
       </div>
     </div>
@@ -132,22 +132,22 @@
   </section>
     <!-- 对话挑战（三选二自动计算） -->
   <section id="secChal">
-    <h2>对话挑战（三选二自动计算）</h2>
+    <h2>对话挑战</h2>
 
     <div class="row cols-2">
       <div>
-        <label for="chalPlain">明文（可含中英文、标点、空格）</label>
+        <label for="chalPlain">明文</label>
         <textarea id="chalPlain" placeholder="粘贴/输入对话明文…"></textarea>
       </div>
       <div>
-        <label for="chalCipher">密文（单行字符串）</label>
+        <label for="chalCipher">密文</label>
         <input id="chalCipher" type="text" class="mono"
                placeholder="在这里粘贴/显示密文…" autocomplete="off" spellcheck="false" />
         <div class="note">提示：仅填写任意两项，第三项会自动计算。</div>
       </div>
     </div>
 
-    <label for="chalTs">时间戳（13 位毫秒纯数字）</label>
+    <label for="chalTs">时间戳</label>
     <input id="chalTs" type="text" class="mono" placeholder="例如：1700000000000"
            autocomplete="off" spellcheck="false" />
 
