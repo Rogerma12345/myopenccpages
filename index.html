@@ -130,6 +130,30 @@
 
     <div id="fetchMsg" class="out muted">提示：目标站点需要允许 CORS 才能读取正文。</div>
   </section>
+    <!-- 对话挑战（三选二自动计算） -->
+  <section id="secChal">
+    <h2>对话挑战（三选二自动计算）</h2>
+
+    <div class="row cols-2">
+      <div>
+        <label for="chalPlain">明文（可含中英文、标点、空格）</label>
+        <textarea id="chalPlain" placeholder="粘贴/输入对话明文…"></textarea>
+      </div>
+      <div>
+        <label for="chalCipher">密文（单行字符串）</label>
+        <input id="chalCipher" type="text" class="mono"
+               placeholder="在这里粘贴/显示密文…" autocomplete="off" spellcheck="false" />
+        <div class="note">提示：仅填写任意两项，第三项会自动计算。</div>
+      </div>
+    </div>
+
+    <label for="chalTs">时间戳（13 位毫秒纯数字）</label>
+    <input id="chalTs" type="text" class="mono" placeholder="例如：1700000000000"
+           autocomplete="off" spellcheck="false" />
+
+    <div id="chalMsg" class="out muted">提示：请填写任意两项。</div>
+  </section>
+  
   <script type="module">
     // OpenCC WASM (Apache-2.0)
     import OpenCC from "https://unpkg.com/opencc-wasm@0.6.1/dist/esm/index.js";
@@ -448,6 +472,344 @@
 
     // 页面关闭时停止定时与请求
     window.addEventListener("beforeunload", () => stopFetchTimer(false));
+        // ====== Challenge (Plain / Cipher / Timestamp) ======
+    const chalPlain = $("chalPlain");
+    const chalCipher = $("chalCipher");
+    const chalTs = $("chalTs");
+    const chalMsg = $("chalMsg");
+
+    // 运行环境检查（WebCrypto 通常需要 HTTPS 或 localhost）
+    const hasWebCrypto = !!(globalThis.crypto && crypto.subtle);
+
+    const MOD_1E13 = 10000000000000n;
+
+    function normalizePlain(s) {
+      return String(s ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    }
+
+    function normalizeTs13(s) {
+      const raw = String(s ?? "").trim();
+      if (!raw) throw new Error("时间戳为空");
+      if (!/^\d+$/.test(raw)) throw new Error("时间戳应为纯数字");
+      if (raw.length === 13) return raw;
+      if (raw.length === 10) return String(BigInt(raw) * 1000n).padStart(13, "0");
+      throw new Error("时间戳应为 13 位毫秒（或 10 位秒）");
+    }
+
+    function parseCipherToken(token) {
+      const t = String(token ?? "").trim();
+      const m = /^(\d{13})-(.+)$/.exec(t);
+      if (!m) throw new Error("密文格式错误，应为：13位数字-Base91串");
+      return { e13: m[1], p91: m[2] };
+    }
+
+    // --- Base91 (basE91) ---
+    const B91 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~"';
+    if (B91.length !== 91) throw new Error("Base91 alphabet length mismatch");
+    const B91_INV = (() => {
+      const m = new Map();
+      for (let i = 0; i < B91.length; i++) m.set(B91[i], i);
+      return m;
+    })();
+
+    function base91Encode(bytes) {
+      let b = 0;
+      let n = 0;
+      let out = "";
+      for (let i = 0; i < bytes.length; i++) {
+        b |= (bytes[i] & 255) << n;
+        n += 8;
+        if (n > 13) {
+          let v = b & 8191; // 2^13-1
+          if (v > 88) {
+            b >>= 13;
+            n -= 13;
+          } else {
+            v = b & 16383;  // 2^14-1
+            b >>= 14;
+            n -= 14;
+          }
+          out += B91[v % 91] + B91[Math.floor(v / 91)];
+        }
+      }
+      if (n) {
+        out += B91[b % 91];
+        if (n > 7 || b > 90) out += B91[Math.floor(b / 91)];
+      }
+      return out;
+    }
+
+    function base91Decode(str) {
+      const s = String(str ?? "");
+      let b = 0;
+      let n = 0;
+      let v = -1;
+      const out = [];
+      for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        const val = B91_INV.get(c);
+        if (val === undefined) throw new Error(`Base91 含非法字符：${c}`);
+        if (v < 0) {
+          v = val;
+        } else {
+          v += val * 91;
+          b |= v << n;
+          n += (v & 8191) > 88 ? 13 : 14;
+          while (n >= 8) {
+            out.push(b & 255);
+            b >>= 8;
+            n -= 8;
+          }
+          v = -1;
+        }
+      }
+      if (v >= 0) {
+        b |= v << n;
+        n += 7;
+        while (n >= 8) {
+          out.push(b & 255);
+          b >>= 8;
+          n -= 8;
+        }
+      }
+      return new Uint8Array(out);
+    }
+
+    // --- WebCrypto helpers ---
+    const te = new TextEncoder();
+    const td = new TextDecoder();
+
+    async function sha256Bytes(u8) {
+      const buf = await crypto.subtle.digest("SHA-256", u8);
+      return new Uint8Array(buf);
+    }
+
+    async function importHmacKey(rawKeyBytes) {
+      return crypto.subtle.importKey(
+        "raw",
+        rawKeyBytes,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+    }
+
+    async function hmacSha256(keyObj, msgBytes) {
+      const sig = await crypto.subtle.sign("HMAC", keyObj, msgBytes);
+      return new Uint8Array(sig);
+    }
+
+    async function keystreamFromTs(ts13, outLen) {
+      const keyObj = await importHmacKey(te.encode(ts13));
+      const out = new Uint8Array(outLen);
+      let off = 0;
+      let ctr = 0;
+      while (off < outLen) {
+        const block = await hmacSha256(keyObj, te.encode(`KS|v1|${ctr}`));
+        const n = Math.min(block.length, outLen - off);
+        out.set(block.subarray(0, n), off);
+        off += n;
+        ctr++;
+      }
+      return out;
+    }
+
+    function xorBytes(a, b) {
+      const n = Math.min(a.length, b.length);
+      const out = new Uint8Array(n);
+      for (let i = 0; i < n; i++) out[i] = a[i] ^ b[i];
+      return out;
+    }
+
+    async function maskFromPlain(plainNorm) {
+      const dig = await sha256Bytes(te.encode(plainNorm));
+      let x = 0n;
+      // 取前 8 字节作为 big-endian 整数
+      for (let i = 0; i < 8; i++) x = (x << 8n) + BigInt(dig[i]);
+      return x % MOD_1E13;
+    }
+
+    async function calcE13(ts13, plainNorm) {
+      const t = BigInt(ts13);
+      const mask = await maskFromPlain(plainNorm);
+      const e = (t + mask) % MOD_1E13;
+      return e.toString().padStart(13, "0");
+    }
+
+    async function encryptToCipher(plainRaw, tsRaw) {
+      if (!hasWebCrypto) throw new Error("当前环境不支持 WebCrypto（需 HTTPS 或 localhost）");
+      const plainNorm = normalizePlain(plainRaw);
+      const ts13 = normalizeTs13(tsRaw);
+
+      const pBytes = te.encode(plainNorm);
+      const chk = (await sha256Bytes(pBytes))[0];
+      const data = new Uint8Array(pBytes.length + 1);
+      data.set(pBytes, 0);
+      data[data.length - 1] = chk;
+
+      const ks = await keystreamFromTs(ts13, data.length);
+      const cBytes = xorBytes(data, ks);
+      const p91 = base91Encode(cBytes);
+
+      const e13 = await calcE13(ts13, plainNorm);
+      return `${e13}-${p91}`;
+    }
+
+    async function decryptPlainFromCipher(cipherRaw, tsRaw) {
+      if (!hasWebCrypto) throw new Error("当前环境不支持 WebCrypto（需 HTTPS 或 localhost）");
+      const { e13, p91 } = parseCipherToken(cipherRaw);
+      const ts13 = normalizeTs13(tsRaw);
+
+      const cBytes = base91Decode(p91);
+      if (cBytes.length < 2) throw new Error("密文长度异常");
+
+      const ks = await keystreamFromTs(ts13, cBytes.length);
+      const data = xorBytes(cBytes, ks);
+
+      const chk = data[data.length - 1];
+      const pBytes = data.subarray(0, data.length - 1);
+
+      const dig0 = (await sha256Bytes(pBytes))[0];
+      if (dig0 !== chk) throw new Error("校验失败：时间戳或密文不匹配");
+
+      const plainNorm = td.decode(pBytes);
+
+      // 额外一致性检查：e13 是否匹配（能更早发现输入错误）
+      const e13Expect = await calcE13(ts13, plainNorm);
+      if (e13Expect !== e13) throw new Error("校验失败：密文头与解密结果不一致");
+
+      return plainNorm;
+    }
+
+    async function recoverTsFromCipherAndPlain(cipherRaw, plainRaw) {
+      if (!hasWebCrypto) throw new Error("当前环境不支持 WebCrypto（需 HTTPS 或 localhost）");
+      const { e13 } = parseCipherToken(cipherRaw);
+      const plainNorm = normalizePlain(plainRaw);
+
+      const e = BigInt(e13);
+      const mask = await maskFromPlain(plainNorm);
+
+      // (e - mask) mod 1e13
+      let t = e - mask;
+      t %= MOD_1E13;
+      if (t < 0n) t += MOD_1E13;
+
+      const ts13 = t.toString().padStart(13, "0");
+
+      // 强校验：用算出来的 ts13 反解密密文，必须得到同一明文
+      const plainCheck = await decryptPlainFromCipher(cipherRaw, ts13);
+      if (plainCheck !== plainNorm) throw new Error("明文与密文不匹配");
+
+      return ts13;
+    }
+
+    // --- UI logic: exactly 2 filled => compute the 3rd; output field becomes readOnly ---
+    function isFilledPlain() { return (chalPlain.value ?? "").length > 0; }
+    function isFilledCipher() { return String(chalCipher.value ?? "").trim().length > 0; }
+    function isFilledTs() { return String(chalTs.value ?? "").trim().length > 0; }
+
+    function setReadOnlyOutput(which /* 'plain'|'cipher'|'ts'|null */) {
+      chalPlain.readOnly = false;
+      chalCipher.readOnly = false;
+      chalTs.readOnly = false;
+      if (which === "plain") chalPlain.readOnly = true;
+      if (which === "cipher") chalCipher.readOnly = true;
+      if (which === "ts") chalTs.readOnly = true;
+    }
+
+    let chalTimer = null;
+    let chalBusy = false;
+
+    function scheduleChalCompute() {
+      if (chalTimer) clearTimeout(chalTimer);
+      chalTimer = setTimeout(() => void computeChal(), 180);
+    }
+
+    async function computeChal() {
+      if (chalBusy) return;
+      chalBusy = true;
+
+      try {
+        const pHas = isFilledPlain();
+        const cHas = isFilledCipher();
+        const tHas = isFilledTs();
+        const filled = (pHas ? 1 : 0) + (cHas ? 1 : 0) + (tHas ? 1 : 0);
+
+        // 三项都填且没有只读输出：视为“填太多”
+        if (filled === 3 && !chalPlain.readOnly && !chalCipher.readOnly && !chalTs.readOnly) {
+          setReadOnlyOutput(null);
+          setBox(chalMsg, "err", "填写过多：请清空其中一项，只保留两项用于计算。");
+          return;
+        }
+
+        if (filled === 0) {
+          setReadOnlyOutput(null);
+          setBox(chalMsg, "muted", "提示：请填写任意两项。");
+          return;
+        }
+
+        if (filled === 1) {
+          setReadOnlyOutput(null);
+          setBox(chalMsg, "muted", "还差一项：请再填写一个字段。");
+          return;
+        }
+
+        // 如果已有只读输出且三项齐全，则保持现状并提示一致性
+        if (filled === 3 && (chalPlain.readOnly || chalCipher.readOnly || chalTs.readOnly)) {
+          setBox(chalMsg, "ok", "已根据两项计算出第三项。若要改方向，请先清空任意一项再输入。");
+          return;
+        }
+
+        // filled === 2: 计算缺失项
+        if (pHas && tHas && !cHas) {
+          setReadOnlyOutput("cipher");
+          setBox(chalMsg, "muted", "计算中…");
+          const cipher = await encryptToCipher(chalPlain.value, chalTs.value);
+          chalCipher.value = cipher;
+          setBox(chalMsg, "ok", "成功：已生成密文。");
+          return;
+        }
+
+        if (cHas && tHas && !pHas) {
+          setReadOnlyOutput("plain");
+          setBox(chalMsg, "muted", "计算中…");
+          const plain = await decryptPlainFromCipher(chalCipher.value, chalTs.value);
+          chalPlain.value = plain;
+          setBox(chalMsg, "ok", "成功：已解出明文。");
+          return;
+        }
+
+        if (cHas && pHas && !tHas) {
+          setReadOnlyOutput("ts");
+          setBox(chalMsg, "muted", "计算中…");
+          const ts13 = await recoverTsFromCipherAndPlain(chalCipher.value, chalPlain.value);
+          chalTs.value = ts13;
+          setBox(chalMsg, "ok", "成功：已解出时间戳（13 位毫秒）。");
+          return;
+        }
+
+        // 其他情况：用户可能在输出框里输入导致矛盾，解除只读并提示
+        setReadOnlyOutput(null);
+        setBox(chalMsg, "err", "状态异常：请只保留两项（清空一项），再进行计算。");
+      } catch (e) {
+        // 出错时解除只读，便于用户修改
+        setReadOnlyOutput(null);
+        setBox(chalMsg, "err", "失败：" + (e?.message ?? e));
+      } finally {
+        chalBusy = false;
+      }
+    }
+
+    chalPlain.addEventListener("input", scheduleChalCompute);
+    chalCipher.addEventListener("input", scheduleChalCompute);
+    chalTs.addEventListener("input", scheduleChalCompute);
+
+    // 初始提示
+    setBox(chalMsg, hasWebCrypto ? "muted" : "err",
+      hasWebCrypto
+        ? "提示：请填写任意两项，第三项会自动计算。"
+        : "当前环境不支持 WebCrypto（通常需要 HTTPS 或 localhost）。"
+    );
   </script>
 </body>
 </html>
