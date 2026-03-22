@@ -90,6 +90,29 @@
     <div id="ccMsg" class="out muted">提示：输入文本后选择转换方向。</div>
   </section>
 
+  <!-- URL 整链可读解码 -->
+  <section id="secUrlDecode">
+    <h2>URL 整链可读解码</h2>
+
+    <div class="row cols-2">
+      <div>
+        <label for="urlDecodeIn">输入</label>
+        <textarea id="urlDecodeIn" placeholder="在这里粘贴完整 URL…"></textarea>
+      </div>
+      <div>
+        <label for="urlDecodeOut">输出</label>
+        <textarea id="urlDecodeOut" readonly placeholder="解码结果将显示在这里…"></textarea>
+      </div>
+    </div>
+
+    <div class="row cols-btn-2">
+      <button id="btnUrlDecode">转换</button>
+      <button id="btnCopyUrlDecode">复制</button>
+    </div>
+
+    <div id="urlDecodeMsg" class="out muted">提示：输入完整 URL 后点击转换。</div>
+  </section>
+  
   <!-- 时间戳转换 -->
   <section id="secTime">
     <h2>时间戳转换</h2>
@@ -230,6 +253,55 @@
       setBox(ccMsg, ok ? "ok" : "err", ok ? "已复制输出" : "复制失败（浏览器权限限制）");
     });
 
+  // ====== URL readable decode ======
+  const urlDecodeIn = $("urlDecodeIn");
+  const urlDecodeOut = $("urlDecodeOut");
+  const urlDecodeMsg = $("urlDecodeMsg");
+  const btnUrlDecode = $("btnUrlDecode");
+  const btnCopyUrlDecode = $("btnCopyUrlDecode");
+
+  function runUrlDecode() {
+    const raw = String(urlDecodeIn.value ?? "").trim();
+    urlDecodeOut.value = "";
+
+    if (!raw) {
+      setBox(urlDecodeMsg, "err", "请输入 URL");
+      return;
+    }
+
+    try {
+      new URL(raw);
+    } catch (_) {
+      setBox(urlDecodeMsg, "err", "URL 格式有误");
+      return;
+    }
+
+    try {
+      const out = decodeURI(raw);
+      urlDecodeOut.value = out;
+      setBox(urlDecodeMsg, "ok", `完成（长度 ${out.length}）`);
+    } catch (e) {
+      if (e instanceof URIError) {
+        setBox(urlDecodeMsg, "err", "URL 中包含非法百分号编码");
+      } else {
+        setBox(urlDecodeMsg, "err", "转换失败：" + (e?.message ?? e));
+      }
+    }
+  }
+
+  btnUrlDecode.addEventListener("click", runUrlDecode);
+
+  btnCopyUrlDecode.addEventListener("click", async () => {
+    const text = urlDecodeOut.value;
+    if (!text) {
+      setBox(urlDecodeMsg, "err", "没有可复制内容");
+      return;
+    }
+
+    const ok = await copyText(text);
+    setBox(urlDecodeMsg, ok ? "ok" : "err", ok ? "已复制输出" : "复制失败（浏览器权限限制）");
+  });
+    
     // ====== Timestamp tools ======
     const tzGuess = dayjs.tz.guess?.() || Intl.DateTimeFormat().resolvedOptions().timeZone || "Local";
 
